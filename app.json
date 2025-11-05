@@ -3,27 +3,19 @@
     "name": "PulseApp",
     "slug": "PulseApp",
     "version": "1.0.0",
+    "sdkVersion": "54.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+    "platforms": ["android", "ios", "web"],
+    "android": {
+      "package": "com.yourcompany.pulseapp",
+      "permissions": ["CAMERA", "FLASHLIGHT", "VIBRATE"],
+      "versionCode": 1
     },
     "ios": {
-      "supportsTablet": true
-    },
-    "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
-      },
-      "edgeToEdgeEnabled": true
-    },
-    "web": {
-      "favicon": "./assets/favicon.png"
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "PulseApp needs camera access to measure heart rate using your fingertip."
+      }
     }
   }
 }
