@@ -16,15 +16,54 @@ import * as ImageManipulator from "expo-image-manipulator";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 /*
-  Native wrapper for: https://models.samsarawellness.in/barcode/
-  - Uploads an image (tries 'file' then 'image' field name)
-  - Shows loading state and server response
-  - Stores results locally in AsyncStorage under "SAVED_BARCODES"
-  - If server response contains nutrition fields, displays them; otherwise shows raw JSON
+  Fixed, defensive BarcodeScannerNative:
+  - Handles new and old expo-image-picker response shapes
+  - Uses safe permission checks (status/granted)
+  - Guards ImageManipulator calls (only when uri is a string)
+  - Builds FormData correctly for React Native
+  - Graceful error alerts
 */
+
 const BACKEND_URL = "https://models.samsarawellness.in/barcode/";
 
+// Normalize ImagePicker result to a consistent small shape:
+// returns { uri, width, height, fileName, type } or null
+function normalizePickerResult(res) {
+  if (!res) return null;
+
+  // New API: { assets: [ { uri, width, height, fileName, type } ], canceled }
+  if (Array.isArray(res.assets) && res.assets.length > 0) {
+    const a = res.assets[0];
+    return {
+      uri: a.uri,
+      width: a.width,
+      height: a.height,
+      fileName: a.fileName || (a.uri ? a.uri.split("/").pop() : undefined),
+      type: a.type || (a.uri && a.uri.endsWith(".png") ? "image/png" : "image/jpeg"),
+    };
+  }
+
+  // Older API: { uri, width, height, cancelled / canceled }
+  if (res.uri) {
+    return {
+      uri: res.uri,
+      width: res.width,
+      height: res.height,
+      fileName: undefined,
+      type: undefined,
+    };
+  }
+
+  return null;
+}
+
+// Resize/compress image safely. Returns { uri, width, height } or null
 async function prepareImage(uri, maxWidth = 1600, compress = 0.8) {
+  if (!uri || typeof uri !== "string") {
+    // invalid uri -> return null (caller will fallback)
+    return null;
+  }
+
   try {
     const result = await ImageManipulator.manipulateAsync(
       uri,
@@ -33,42 +72,41 @@ async function prepareImage(uri, maxWidth = 1600, compress = 0.8) {
     );
     return result;
   } catch (err) {
-    console.warn("Image manipulate failed, using original:", err);
+    // If manipulation fails, return fallback object with original uri
+    console.warn("ImageManipulator failed; using original uri.", err?.message ?? err);
     return { uri };
   }
 }
 
-function makeFileObject(uri) {
-  const parts = uri.split("/");
-  const name = parts[parts.length - 1] || `photo.jpg`;
+// Build file object suitable for FormData append in React Native
+function buildFileForUpload(normalized) {
+  if (!normalized || !normalized.uri) return null;
+  const rawUri = normalized.uri;
+  const uri = Platform.OS === "android" ? rawUri : rawUri.replace("file://", "");
+  const name = normalized.fileName || (uri && uri.split("/").pop()) || `photo_${Date.now()}.jpg`;
   const extMatch = /\.(\w+)$/.exec(name);
   const ext = extMatch ? extMatch[1].toLowerCase() : "jpg";
-  const mime = ext === "png" ? "image/png" : "image/jpeg";
-  return {
-    uri: Platform.OS === "android" ? uri : uri.replace("file://", ""),
-    name,
-    type: mime,
-  };
+  const mime = normalized.type || (ext === "png" ? "image/png" : "image/jpeg");
+  return { uri, name, type: mime };
 }
 
 export default function BarcodeScannerNative({ navigation }) {
-  const [image, setImage] = useState(null); // { uri, width, height }
+  const [image, setImage] = useState(null); // { uri, width, height, fileName, type }
   const [loading, setLoading] = useState(false);
   const [serverResult, setServerResult] = useState(null);
   const [savedFoods, setSavedFoods] = useState([]);
 
   useEffect(() => {
-    loadSaved();
+    (async () => {
+      // load saved scans once
+      try {
+        const s = await AsyncStorage.getItem("SAVED_BARCODES");
+        if (s) setSavedFoods(JSON.parse(s));
+      } catch (err) {
+        console.warn("Failed reading saved foods:", err);
+      }
+    })();
   }, []);
-
-  const loadSaved = async () => {
-    try {
-      const s = await AsyncStorage.getItem("SAVED_BARCODES");
-      if (s) setSavedFoods(JSON.parse(s));
-    } catch (err) {
-      console.warn("Failed reading saved foods:", err);
-    }
-  };
 
   const saveResult = async (item) => {
     try {
@@ -80,87 +118,132 @@ export default function BarcodeScannerNative({ navigation }) {
     }
   };
 
+  // === Pick from gallery ===
   const pickFromGallery = async () => {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert("Permission required", "Please allow gallery access.");
-      return;
-    }
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 1,
-      base64: false,
-    });
-    if (!res.cancelled) {
-      const prepared = await prepareImage(res.uri);
-      setImage(prepared);
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      // Newer API returns { status } while older may return { granted }
+      if ((perm.status && perm.status !== "granted") || (perm.granted === false)) {
+        Alert.alert("Permission required", "Please allow gallery access to choose an image.");
+        return;
+      }
+
+      // Choose correct mediaTypes constant depending on SDK shape
+      const mediaTypeConst = ImagePicker.MediaType?.Images ?? ImagePicker.MediaTypeOptions?.Images ?? ImagePicker.MediaTypeOptions;
+
+      const res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: mediaTypeConst,
+        quality: 1,
+        base64: false,
+      });
+
+      // Support both 'canceled' and 'cancelled'
+      if (res.canceled === true || res.cancelled === true) return;
+
+      const normalized = normalizePickerResult(res);
+      if (!normalized || !normalized.uri) {
+        Alert.alert("No image", "Could not read the selected image. Try another image.");
+        return;
+      }
+
+      // Attempt to compress/resize; if it fails, fall back to normalized
+      const prepared = await prepareImage(normalized.uri);
+      const final = prepared ? { ...prepared, fileName: normalized.fileName, type: normalized.type } : normalized;
+      setImage(final);
       setServerResult(null);
+    } catch (err) {
+      console.error("pickFromGallery error:", err);
+      Alert.alert("Error", "Failed to pick image. Try again.");
     }
   };
 
+  // === Take photo ===
   const takePhoto = async () => {
-    const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert("Permission required", "Please allow camera access.");
-      return;
-    }
-    const res = await ImagePicker.launchCameraAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 1,
-      base64: false,
-    });
-    if (!res.cancelled) {
-      const prepared = await prepareImage(res.uri);
-      setImage(prepared);
+    try {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if ((perm.status && perm.status !== "granted") || (perm.granted === false)) {
+        Alert.alert("Permission required", "Please allow camera access to take a photo.");
+        return;
+      }
+
+      const mediaTypeConst = ImagePicker.MediaType?.Images ?? ImagePicker.MediaTypeOptions?.Images ?? ImagePicker.MediaTypeOptions;
+      const res = await ImagePicker.launchCameraAsync({
+        mediaTypes: mediaTypeConst,
+        quality: 1,
+        base64: false,
+      });
+
+      if (res.canceled === true || res.cancelled === true) return;
+
+      const normalized = normalizePickerResult(res);
+      if (!normalized || !normalized.uri) {
+        Alert.alert("Camera failed", "Could not capture image. Try again.");
+        return;
+      }
+
+      const prepared = await prepareImage(normalized.uri);
+      const final = prepared ? { ...prepared, fileName: normalized.fileName, type: normalized.type } : normalized;
+      setImage(final);
       setServerResult(null);
+    } catch (err) {
+      console.error("takePhoto error:", err);
+      Alert.alert("Error", "Failed to take photo. Try again.");
     }
   };
 
-  // Try multiple form field names used by web frontends
+  // === Upload image (tries field names 'file' then 'image') ===
   const uploadImage = async () => {
     if (!image || !image.uri) {
       Alert.alert("No image selected", "Tap 'Choose Image' to pick or take a barcode photo.");
       return;
     }
 
-    const fileObj = makeFileObject(image.uri);
-    const fieldNames = ["file", "image"];
+    const fileObj = buildFileForUpload(image);
+    if (!fileObj) {
+      Alert.alert("Invalid image", "Could not build upload file from selected image.");
+      return;
+    }
+
+    const fields = ["file", "image"];
     setLoading(true);
     setServerResult(null);
+    let lastError = null;
 
-    let lastErr = null;
     try {
-      for (const field of fieldNames) {
+      for (const field of fields) {
         const fd = new FormData();
-        fd.append(field, fileObj);
+        fd.append(field, { uri: fileObj.uri, name: fileObj.name, type: fileObj.type });
 
-        const resp = await fetch(BACKEND_URL, {
-          method: "POST",
-          body: fd,
-        });
+        let resp;
+        try {
+          resp = await fetch(BACKEND_URL, { method: "POST", body: fd });
+        } catch (netErr) {
+          lastError = netErr;
+          continue; // try next field or finish
+        }
 
-        // If OK, parse JSON or fallback to text
         if (resp.ok) {
           let parsed;
           try {
             parsed = await resp.json();
           } catch {
-            parsed = { rawText: await resp.text() };
+            parsed = { rawText: await resp.text().catch(() => "") };
           }
           const out = { method: "upload", field, status: resp.status, body: parsed, when: new Date().toISOString() };
           setServerResult(out);
-          saveResult(out);
+          await saveResult(out);
           setLoading(false);
           return;
         } else {
           const txt = await resp.text().catch(() => "");
-          lastErr = `status ${resp.status}: ${txt}`;
+          lastError = new Error(`status ${resp.status}: ${txt}`);
         }
       }
 
-      throw new Error(lastErr || "Upload failed");
+      // none succeeded
+      throw lastError || new Error("Upload failed");
     } catch (err) {
-      console.error("Upload error:", err);
+      console.error("uploadImage error:", err);
       Alert.alert("Upload failed", err.message || "Unknown error");
     } finally {
       setLoading(false);
@@ -172,10 +255,9 @@ export default function BarcodeScannerNative({ navigation }) {
     setServerResult(null);
   };
 
-  // Small helper to render nutrition if present (best-effort)
+  // Render nutrition if available (best-effort)
   const renderNutrition = (body) => {
     if (!body) return null;
-    // Look for common keys (name, calories, nutrients, nutrition)
     const name = body.name || body.title || body.product_name || null;
     const calories = body.calories || (body.nutrition && body.nutrition.calories) || null;
     const nutrients = body.nutrients || body.nutrition || null;
@@ -195,7 +277,7 @@ export default function BarcodeScannerNative({ navigation }) {
           </View>
         )}
         {!name && !calories && !nutrients && (
-          <Text style={{ marginTop: 6 }}>No structured nutrition fields detected — showing raw response below.</Text>
+          <Text style={{ marginTop: 6 }}>No structured nutrition fields detected — showing raw below.</Text>
         )}
       </View>
     );
@@ -219,10 +301,17 @@ export default function BarcodeScannerNative({ navigation }) {
         {image ? (
           <Card>
             <Card.Content style={{ alignItems: "center" }}>
-              <Image source={{ uri: image.uri }} style={styles.previewImage} />
+              {image.uri ? (
+                <Image source={{ uri: image.uri }} style={styles.previewImage} />
+              ) : (
+                <View style={[styles.previewImage, { justifyContent: "center", alignItems: "center" }]}>
+                  <Text>No preview available</Text>
+                </View>
+              )}
+
               <Paragraph style={{ marginTop: 8 }}>
                 {image.width ? `${image.width}×${image.height} • ` : ""}
-                {image.uri.split("/").pop()}
+                {image.uri ? image.uri.split("/").pop() : "unknown.jpg"}
               </Paragraph>
               <View style={{ flexDirection: "row", marginTop: 8 }}>
                 <Button mode="contained" onPress={uploadImage} style={{ marginRight: 8 }}>
@@ -236,7 +325,7 @@ export default function BarcodeScannerNative({ navigation }) {
           </Card>
         ) : (
           <Card style={{ padding: 12, alignItems: "center" }}>
-            <Paragraph>Drag and drop is not available in-app. Use Choose Image or Take Photo.</Paragraph>
+            <Paragraph>Choose Image or Take Photo and then tap Scan Barcode.</Paragraph>
             <Paragraph style={{ marginTop: 8, color: "#666" }}>After choosing, tap Scan Barcode.</Paragraph>
           </Card>
         )}
