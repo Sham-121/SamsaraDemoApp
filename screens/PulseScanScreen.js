@@ -1,4 +1,5 @@
-import React, { useRef, useState } from "react";
+// screens/PulseScanScreen.js
+import React, { useRef, useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -6,82 +7,116 @@ import {
   ActivityIndicator,
   Alert,
   TouchableOpacity,
+  Linking,
 } from "react-native";
-import {
-  CameraView,
-  CameraType,
-  useCameraPermissions,
-} from "expo-camera";
+import { CameraView, useCameraPermissions } from "expo-camera";
+import * as FileSystem from 'expo-file-system/legacy';
 
-// TODO: replace with your real backend URL:
-// e.g. "http://192.168.0.101:8000/analyze_ppg_video"
+// 🔗 BACKEND URL
 const API_URL = "https://hrmppgbackend.onrender.com/analyze_ppg_video";
 
-const MEASUREMENT_DURATION_SECONDS = 8;
-
-const PulseScanScreen = () => {
+export default function PulseScanScreen() {
   const cameraRef = useRef(null);
   const [permission, requestPermission] = useCameraPermissions();
 
   const [isRecording, setIsRecording] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [bpm, setBpm] = useState(null);
   const [error, setError] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState("");
+  const [showCamera, setShowCamera] = useState(true);
 
-  if (!permission) {
-    // still loading permission state
-    return <View style={{ flex: 1, backgroundColor: "#000" }} />;
-  }
+  // Ask for permission when screen loads
+  useEffect(() => {
+    if (!permission) return;
+    if (!permission.granted && permission.canAskAgain) {
+      requestPermission();
+    }
+  }, [permission, requestPermission]);
 
-  if (!permission.granted) {
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.permissionText}>
-          We need camera permission to measure your heart rate.
-        </Text>
-        <TouchableOpacity
-          style={styles.primaryButton}
-          onPress={requestPermission}
-        >
-          <Text style={styles.primaryButtonText}>Grant Permission</Text>
-        </TouchableOpacity>
-      </View>
+  const handleOpenSettings = () => {
+    Alert.alert(
+      "Camera Permission",
+      "Camera access is blocked. Please enable it in system settings.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Open Settings", onPress: () => Linking.openSettings() },
+      ]
     );
-  }
+  };
 
   const uploadVideoAndGetBpm = async (uri) => {
     try {
+      console.log("📹 Video URI:", uri);
       setError(null);
       setBpm(null);
 
-      const fileName = uri.split("/").pop() || "ppg_video.mp4";
+      // Check file exists and size
+      const fileInfo = await FileSystem.getInfoAsync(uri);
+      console.log("📁 File info:", fileInfo);
+      
+      if (!fileInfo.exists) {
+        throw new Error("Video file not found");
+      }
+      
+      const fileSizeMB = fileInfo.size / 1024 / 1024;
+      console.log(`📏 File size: ${fileSizeMB.toFixed(2)} MB`);
 
-      const formData = new FormData();
-      formData.append("file", {
-        uri,
-        name: fileName,
-        type: "video/mp4", // usually fine; adjust if needed
-      });
+      // Warn if file is very large
+      if (fileSizeMB > 50) {
+        setUploadProgress(`Uploading large file (${fileSizeMB.toFixed(0)}MB)... This may take a while`);
+      } else {
+        setUploadProgress("Uploading video...");
+      }
 
-      const res = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "multipart/form-data",
+      // Use expo-file-system for more reliable uploads
+      console.log("📤 Uploading via FileSystem.uploadAsync...");
+
+      const uploadResult = await FileSystem.uploadAsync(API_URL, uri, {
+        fieldName: 'file',
+        httpMethod: 'POST',
+        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        uploadProgressCallback: (progress) => {
+          const percent = (progress.totalBytesSent / progress.totalBytesExpectedToSend * 100).toFixed(0);
+          console.log(`📊 Upload progress: ${percent}%`);
+          setUploadProgress(`Uploading... ${percent}%`);
         },
-        body: formData,
       });
 
-      const data = await res.json();
+      console.log("📊 Upload complete! Status:", uploadResult.status);
+      console.log("📄 Response body:", uploadResult.body);
 
-      if (!res.ok) {
-        const msg = data.detail || "Server error while analyzing video";
+      setUploadProgress("Analyzing heart rate...");
+
+      let data;
+      try {
+        data = JSON.parse(uploadResult.body);
+      } catch (parseError) {
+        console.error("JSON parse error:", parseError);
+        throw new Error(`Server returned invalid response: ${uploadResult.body.substring(0, 100)}`);
+      }
+
+      console.log("✅ Parsed response:", data);
+
+      if (uploadResult.status !== 200) {
+        const msg = data.detail || data.message || `Server error: ${uploadResult.status}`;
         throw new Error(msg);
       }
 
-      setBpm(data.bpm);
+      if (data.bpm) {
+        setBpm(data.bpm);
+        setUploadProgress("");
+        setIsProcessing(false);
+        Alert.alert("Success!", `Your heart rate is ${data.bpm} BPM`);
+      } else {
+        throw new Error("No BPM data in response");
+      }
     } catch (err) {
-      console.error("Upload/analyze error:", err);
+      console.error("❌ Upload/analyze error:", err);
       const msg = err.message || "Something went wrong";
       setError(msg);
+      setUploadProgress("");
+      setIsProcessing(false);
       Alert.alert("Error", msg);
     }
   };
@@ -91,66 +126,200 @@ const PulseScanScreen = () => {
       Alert.alert("Error", "Camera not ready yet");
       return;
     }
-    try {
-      setIsRecording(true);
-      setError(null);
-      setBpm(null);
+    if (isRecording) {
+      console.log("Already recording, ignoring start request");
+      return;
+    }
 
-      // Record short video with torch on
+    console.log("🎬 Starting measurement…");
+    setIsRecording(true);
+    setError(null);
+    setBpm(null);
+    setUploadProgress("");
+    setShowCamera(true);
+
+    try {
+      console.log("🔴 Calling recordAsync…");
+      
+      // Record video - user will manually stop
       const video = await cameraRef.current.recordAsync({
-        maxDuration: MEASUREMENT_DURATION_SECONDS,
-        mute: true,           // no audio needed
-        quality: "480p",      // small file
+        mute: true,
+        quality: '480p', // Lower quality to reduce file size
       });
+      
+      console.log("✅ recordAsync resolved:", video);
 
       if (!video || !video.uri) {
         throw new Error("No video captured");
       }
 
+      // Hide camera and show processing
+      setShowCamera(false);
+      setIsProcessing(true);
+      setUploadProgress("Processing video...");
+
+      // Upload and analyze
       await uploadVideoAndGetBpm(video.uri);
     } catch (err) {
-      if (err?.message?.includes("Another recording in progress")) {
-        // common camera error, handle gracefully
-        Alert.alert("Camera Busy", "Please try again.");
-      } else if (err?.message && err.message !== "Aborted") {
-        console.error("Recording error:", err);
+      console.error("❌ Recording error:", err);
+      
+      // Ignore "Aborted" errors (these happen when user stops recording)
+      if (
+        err?.message &&
+        err.message !== "Aborted" &&
+        !err.message.includes("stopRecording") &&
+        !err.message.includes("Recording already stopped")
+      ) {
+        setError(err.message);
+        setIsProcessing(false);
+        setShowCamera(true);
         Alert.alert("Error", err.message);
       }
     } finally {
-      // stopRecording is automatically called on maxDuration
       setIsRecording(false);
+      console.log("🏁 Measurement finished");
     }
   };
 
+  const stopMeasurement = () => {
+    if (!cameraRef.current) {
+      console.log("No camera ref available");
+      return;
+    }
+    if (!isRecording) {
+      console.log("Not currently recording, ignoring stop request");
+      return;
+    }
+    
+    console.log("⏹️ Manually stopping recording");
+    try {
+      cameraRef.current.stopRecording();
+    } catch (e) {
+      console.log("stopRecording error (often harmless):", e);
+    }
+  };
+
+  const resetForNewMeasurement = () => {
+    setBpm(null);
+    setError(null);
+    setUploadProgress("");
+    setIsProcessing(false);
+    setShowCamera(true);
+  };
+
+  // 1) Permission loading
+  if (!permission) {
+    return <View style={styles.fullScreenDark} />;
+  }
+
+  // 2) Permission denied permanently
+  if (!permission.granted && permission.canAskAgain === false) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.permissionTitle}>Camera Permission Required</Text>
+        <Text style={styles.permissionText}>
+          Camera access has been denied. Please enable it in your device
+          settings to measure your heart rate.
+        </Text>
+        <TouchableOpacity style={styles.primaryButton} onPress={handleOpenSettings}>
+          <Text style={styles.primaryButtonText}>Open Settings</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // 3) Permission not yet granted but we *can* ask
+  if (!permission.granted) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.permissionTitle}>We need your permission</Text>
+        <Text style={styles.permissionText}>
+          Allow camera access so we can use the rear camera and flashlight to
+          measure your pulse.
+        </Text>
+        <TouchableOpacity
+          style={styles.primaryButton}
+          onPress={async () => {
+            const result = await requestPermission();
+            console.log("Camera permission result:", result);
+          }}
+        >
+          <Text style={styles.primaryButtonText}>Grant Permission</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // 4) Permission granted → show camera + UI
   return (
     <View style={styles.container}>
-      {/* Camera preview */}
-      <View style={styles.cameraWrapper}>
-        <CameraView
-          ref={cameraRef}
-          style={styles.camera}
-          facing="back"
-          enableTorch={true}             // torch on while previewing/recording
-          mode="video"
-          mute={true}
-        />
-      </View>
+      {showCamera ? (
+        <View style={styles.cameraWrapper}>
+          <CameraView
+            ref={cameraRef}
+            style={styles.camera}
+            facing="back"
+            mode="video"
+            mute={true}
+            enableTorch={isRecording} // Only enable torch when recording
+          />
+        </View>
+      ) : (
+        <View style={styles.processingView}>
+          <ActivityIndicator size="large" color="#3b82f6" />
+          <Text style={styles.processingText}>Processing your pulse data...</Text>
+        </View>
+      )}
 
-      {/* UI overlay */}
       <View style={styles.overlay}>
         <Text style={styles.title}>Pulse Scanner</Text>
         <Text style={styles.subtitle}>
-          Place your finger gently on the camera and flash and hold still while
-          we record for {MEASUREMENT_DURATION_SECONDS} seconds.
+          {showCamera 
+            ? "Place your finger gently on the camera and flash. Hold still for at least 10 seconds."
+            : "Analyzing your heart rate..."
+          }
         </Text>
 
         <View style={styles.card}>
           {isRecording ? (
             <>
-              <ActivityIndicator size="large" />
+              <View style={styles.recordingIndicator}>
+                <View style={styles.recordingDot} />
+                <Text style={styles.recordingText}>RECORDING</Text>
+              </View>
               <Text style={styles.statusText}>
-                Measuring... Keep your finger still.
+                Keep your finger still!
               </Text>
+              <Text style={styles.statusSubtext}>
+                Tap "Stop" after 10-15 seconds
+              </Text>
+              <TouchableOpacity
+                style={[styles.primaryButton, { marginTop: 12, backgroundColor: "#ef4444" }]}
+                onPress={stopMeasurement}
+              >
+                <Text style={styles.primaryButtonText}>Stop Recording</Text>
+              </TouchableOpacity>
+            </>
+          ) : isProcessing ? (
+            <>
+              <ActivityIndicator size="large" color="#3b82f6" />
+              <Text style={styles.statusText}>{uploadProgress}</Text>
+              <Text style={styles.statusSubtext}>
+                {uploadProgress.includes("Uploading") && "Please wait, this may take up to 60 seconds..."}
+              </Text>
+            </>
+          ) : bpm !== null ? (
+            <>
+              <View style={styles.resultContainer}>
+                <Text style={styles.resultLabel}>Heart Rate</Text>
+                <Text style={styles.resultBpm}>{bpm} BPM</Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.primaryButton, { marginTop: 16, backgroundColor: "#3b82f6" }]}
+                onPress={resetForNewMeasurement}
+              >
+                <Text style={styles.primaryButtonText}>Measure Again</Text>
+              </TouchableOpacity>
             </>
           ) : (
             <TouchableOpacity
@@ -162,34 +331,50 @@ const PulseScanScreen = () => {
             </TouchableOpacity>
           )}
 
-          {bpm !== null && !isRecording && (
-            <View style={styles.resultContainer}>
-              <Text style={styles.resultLabel}>Heart Rate</Text>
-              <Text style={styles.resultBpm}>{bpm} BPM</Text>
-            </View>
-          )}
-
-          {error && !isRecording && (
-            <Text style={styles.errorText}>Error: {error}</Text>
+          {error && !isRecording && !isProcessing && (
+            <>
+              <Text style={styles.errorText}>Error: {error}</Text>
+              <TouchableOpacity
+                style={[styles.primaryButton, { marginTop: 12, backgroundColor: "#3b82f6" }]}
+                onPress={resetForNewMeasurement}
+              >
+                <Text style={styles.primaryButtonText}>Try Again</Text>
+              </TouchableOpacity>
+            </>
           )}
         </View>
 
-        <View style={styles.tipsBox}>
-          <Text style={styles.tipsTitle}>Tips</Text>
-          <Text style={styles.tipItem}>• Remove any case if it covers the flash.</Text>
-          <Text style={styles.tipItem}>• Don&apos;t press too hard.</Text>
-          <Text style={styles.tipItem}>• Keep hand and phone as still as possible.</Text>
-        </View>
+        {showCamera && !bpm && (
+          <View style={styles.tipsBox}>
+            <Text style={styles.tipsTitle}>Tips for Best Results</Text>
+            <Text style={styles.tipItem}>
+              • Remove any case if it covers the flash
+            </Text>
+            <Text style={styles.tipItem}>
+              • Cover both camera AND flash with your fingertip
+            </Text>
+            <Text style={styles.tipItem}>
+              • Don't press too hard (light pressure)
+            </Text>
+            <Text style={styles.tipItem}>
+              • Keep hand and phone completely still
+            </Text>
+            <Text style={styles.tipItem}>
+              • Record for at least 10 seconds
+            </Text>
+          </View>
+        )}
       </View>
     </View>
   );
-};
+}
 
-export default PulseScanScreen;
-
-// --------- Styles ---------
-
+// ---------- styles ----------
 const styles = StyleSheet.create({
+  fullScreenDark: {
+    flex: 1,
+    backgroundColor: "#020617",
+  },
   container: {
     flex: 1,
     backgroundColor: "#020617",
@@ -199,6 +384,18 @@ const styles = StyleSheet.create({
   },
   camera: {
     flex: 1,
+  },
+  processingView: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#020617",
+  },
+  processingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: "#e5e7eb",
+    fontWeight: "500",
   },
   overlay: {
     position: "absolute",
@@ -230,16 +427,43 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#1f2937",
   },
+  recordingIndicator: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  recordingDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: "#ef4444",
+    marginRight: 8,
+  },
+  recordingText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#ef4444",
+    letterSpacing: 1,
+  },
   statusText: {
     marginTop: 12,
     fontSize: 14,
     color: "#e5e7eb",
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  statusSubtext: {
+    marginTop: 4,
+    fontSize: 12,
+    color: "#9ca3af",
+    textAlign: "center",
   },
   primaryButton: {
     backgroundColor: "#3b82f6",
     paddingVertical: 12,
     paddingHorizontal: 28,
     borderRadius: 999,
+    alignItems: "center",
   },
   primaryButtonText: {
     color: "#f9fafb",
@@ -247,7 +471,7 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   resultContainer: {
-    marginTop: 18,
+    marginTop: 8,
     alignItems: "center",
   },
   resultLabel: {
@@ -256,7 +480,7 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   resultBpm: {
-    fontSize: 32,
+    fontSize: 40,
     fontWeight: "800",
     color: "#22c55e",
   },
@@ -278,11 +502,12 @@ const styles = StyleSheet.create({
     color: "#e5e7eb",
     fontSize: 13,
     fontWeight: "600",
-    marginBottom: 4,
+    marginBottom: 6,
   },
   tipItem: {
     color: "#9ca3af",
     fontSize: 12,
+    marginBottom: 2,
   },
   centered: {
     flex: 1,
@@ -291,8 +516,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     padding: 24,
   },
+  permissionTitle: {
+    color: "#f9fafb",
+    fontSize: 18,
+    fontWeight: "700",
+    marginBottom: 8,
+    textAlign: "center",
+  },
   permissionText: {
-    color: "#e5e7eb",
+    color: "#cbd5f5",
     fontSize: 14,
     textAlign: "center",
     marginBottom: 16,
