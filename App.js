@@ -1,20 +1,26 @@
 // App.js
 import React from "react";
-import { StatusBar, View } from "react-native";
-import { Provider as PaperProvider, DefaultTheme as PaperDefaultTheme } from "react-native-paper";
-import { NavigationContainer, DefaultTheme as NavigationDefaultTheme } from "@react-navigation/native";
+import { StatusBar } from "react-native";
+import {
+  Provider as PaperProvider,
+  DefaultTheme as PaperDefaultTheme,
+} from "react-native-paper";
+import {
+  NavigationContainer,
+  DefaultTheme as NavigationDefaultTheme,
+} from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 
 import HomeScreen from "./screens/HomeScreen";
 import InstructionsScreen from "./screens/InstructionsScreen";
 import AyurvedaBotScreen from "./screens/AyurvedaBotScreen";
 import BarcodeScannerNative from "./screens/BarcodeScannerNative";
-import FoodScanner from "./screens/FoodScannerScreen"; // ensure filename matches
+import FoodScanner from "./screens/FoodScannerScreen";
+import PulseScanScreen from "./screens/PulseScanScreen";
 
-// --------------------
-// Customize your light theme here
-// Use the colors you prefer (these match the purple accent you used while testing)
-const APP_PRIMARY = "#684bf7ff"; // purple primary for buttons
+
+// Theme stuff
+const APP_PRIMARY = "#684bf7ff";
 const APP_ACCENT = "#E9D5FF";
 const APP_BACKGROUND = "#FFFFFF";
 const APP_SURFACE = "#FFFFFF";
@@ -57,18 +63,42 @@ export default function App() {
   return (
     <PaperProvider theme={paperTheme}>
       <NavigationContainer theme={navTheme}>
-        {/* Status bar: dark-content for light background */}
         <StatusBar barStyle="dark-content" backgroundColor={APP_BACKGROUND} />
-        <Stack.Navigator initialRouteName="Home" screenOptions={{
-          headerStyle: { backgroundColor: APP_SURFACE },
-          headerTintColor: APP_TEXT,
-          contentStyle: { backgroundColor: APP_BACKGROUND }
-        }}>
-          <Stack.Screen name="Home" component={HomeScreen} options={{ title: "PulseApp — Home" }} />
+        <Stack.Navigator
+          initialRouteName="Home"
+          screenOptions={{
+            headerStyle: { backgroundColor: APP_SURFACE },
+            headerTintColor: APP_TEXT,
+            contentStyle: { backgroundColor: APP_BACKGROUND },
+          }}
+        >
+          <Stack.Screen
+            name="Home"
+            component={HomeScreen}
+            options={{ title: "PulseApp — Home" }}
+          />
           <Stack.Screen name="Instructions" component={InstructionsScreen} />
-          <Stack.Screen name="AyurvedaBot" component={AyurvedaBotScreen} />
-          <Stack.Screen name="BarcodeScannerNative" component={BarcodeScannerNative} options={{ title: "Barcode Scanner" }} />
-          <Stack.Screen name="FoodScanner" component={FoodScanner} options={{ title: "Food Scanner" }} />
+          <Stack.Screen
+            name="AyurvedaBot"
+            component={AyurvedaBotScreen}
+          />
+          <Stack.Screen
+            name="BarcodeScannerNative"
+            component={BarcodeScannerNative}
+            options={{ title: "Barcode Scanner" }}
+          />
+          <Stack.Screen
+            name="FoodScanner"
+            component={FoodScanner}
+            options={{ title: "Food Scanner" }}
+          />
+
+      
+          <Stack.Screen
+            name="PulseScan"
+            component={PulseScanScreen}
+            options={{ title: "Pulse Scan" }}
+          />
         </Stack.Navigator>
       </NavigationContainer>
     </PaperProvider>

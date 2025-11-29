@@ -8,10 +8,13 @@ export default function InstructionsScreen({ navigation }) {
       <Text style={styles.title}>How to Measure Pulse</Text>
       <Text style={styles.instruction}>1. Place your fingertip fully on the rear camera lens.</Text>
       <Text style={styles.instruction}>2. Keep still and do not press too hard.</Text>
-      <Text style={styles.instruction}>3. The flash will turn on automatically.</Text>
+      <Text style={styles.instruction}>3. The flashlight will turn on automatically.</Text>
       <Text style={styles.instruction}>4. Stay still until the measurement is done.</Text>
 
-      <TouchableOpacity style={styles.button} onPress={() =>navigation.navigate(PulseScanScreen)}>
+      <TouchableOpacity
+        style={styles.button}
+        onPress={() => navigation.navigate("PulseScan")}
+      >
         <Text style={styles.buttonText}>Continue</Text>
       </TouchableOpacity>
     </View>
